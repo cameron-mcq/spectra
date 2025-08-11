@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Audio Spectrum Analyser (Dark)</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { height: 100%; margin: 0; background: #0b0e12; color: #e5e7eb; font-family: system-ui; }
+  .wrap { display: grid; grid-template-rows: auto 1fr auto; height: 100%; }
+  header, footer { padding: .75rem 1rem; background: #0f141b; border-bottom: 1px solid #1f2937; }
+  footer { border-top: 1px solid #1f2937; border-bottom: none; display:flex; gap:1rem; align-items:center; justify-content:space-between; }
+  .controls { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
+  .btn { background: #111827; border: 1px solid #374151; color: #e5e7eb; padding: .5rem .75rem; border-radius: .6rem; cursor: pointer; }
+  .btn:hover{ background:#0b1220; }
+  .btn:disabled{ opacity:.5; cursor:not-allowed; }
+  .stack { display:flex; gap:.5rem; align-items:center; }
+  .main { position: relative; }
+  #spectrum { position:absolute; inset:0; width:100%; height:100%; display:block; }
+  input[type="range"] { background:#0b1118; border:1px solid #253042; color:#e5e7eb; border-radius:.5rem; padding:.15rem .4rem; }
+  .tooltip { position: absolute; background: rgba(0,0,0,0.85); border:1px solid #253042; color: #fff; padding: 2px 6px; border-radius: 4px; font-size: 0.8rem; pointer-events: none; display: none; white-space: nowrap; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div class="controls">
+    <input id="file" type="file" accept="audio/*,.wav,.mp3" />
+    <button id="play" class="btn" disabled>Play</button>
+    <button id="stop" class="btn" disabled>Stop</button>
+    <div class="stack">
+      <label for="smoothing">Smoothing</label>
+      <input id="smoothing" type="range" min="0" max="0.95" step="0.01" value="0.5" />
+    </div>
+    <div class="stack">
+      <label for="gain">Volume</label>
+      <input id="gain" type="range" min="0" max="2" step="0.01" value="1" />
+    </div>
+  </div>
+</header>
+<div class="main" id="stage">
+  <canvas id="spectrum"></canvas>
+  <div class="tooltip" id="tooltip"></div>
+</div>
+<footer>
+  <span id="status">Load a file</span>
+  <audio id="audio" crossorigin="anonymous" controls style="max-width:40rem; width:100%"></audio>
+</footer>
+</div>
+<script>
+const fileEl = document.getElementById('file');
+const playBtn = document.getElementById('play');
+const stopBtn = document.getElementById('stop');
+const statusEl = document.getElementById('status');
+const audioEl = document.getElementById('audio');
+const stage = document.getElementById('stage');
+const spectrumCanvas = document.getElementById('spectrum');
+const tooltip = document.getElementById('tooltip');
+const smoothingEl = document.getElementById('smoothing');
+const gainEl = document.getElementById('gain');
+
+const specCtx = spectrumCanvas.getContext('2d');
+let audioCtx, source, analyser, gainNode;
+let rafId;
+let freqArray;
+const DPR = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+
+function resize() {
+  const { clientWidth: w, clientHeight: h } = stage;
+  spectrumCanvas.width = Math.floor(w * DPR);
+  spectrumCanvas.height = Math.floor(h * DPR);
+  spectrumCanvas.style.width = w + 'px';
+  spectrumCanvas.style.height = h + 'px';
+}
+
+function initAudioGraph() {
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  source = audioCtx.createMediaElementSource(audioEl);
+  analyser = audioCtx.createAnalyser();
+  gainNode = audioCtx.createGain();
+
+  analyser.fftSize = 4096; // can be tuned
+  analyser.minDecibels = -100;
+  analyser.maxDecibels = -10;
+  analyser.smoothingTimeConstant = parseFloat(smoothingEl.value);
+
+  gainNode.gain.value = parseFloat(gainEl.value);
+
+  source.connect(gainNode).connect(audioCtx.destination);
+  source.connect(analyser);
+
+  freqArray = new Float32Array(analyser.frequencyBinCount);
+}
+
+function drawSpectrum() {
+  const w = spectrumCanvas.width, h = spectrumCanvas.height;
+  specCtx.clearRect(0,0,w,h);
+  analyser.getFloatFrequencyData(freqArray);
+
+  // curve
+  specCtx.beginPath();
+  for (let i = 0; i < analyser.frequencyBinCount; i++) {
+    const db = freqArray[i];
+    const y = (1 - (db + 100) / 90) * h; // map -100..-10 dB → 1..0
+    const x = i * w / analyser.frequencyBinCount;
+    if (i === 0) specCtx.moveTo(x, y); else specCtx.lineTo(x, y);
+  }
+  specCtx.strokeStyle = '#93c5fd';
+  specCtx.lineWidth = 2 * DPR;
+  specCtx.stroke();
+
+  // subtle fill
+  specCtx.lineTo(w, h); specCtx.lineTo(0, h); specCtx.closePath();
+  specCtx.globalAlpha = 0.18; specCtx.fillStyle = '#60a5fa'; specCtx.fill(); specCtx.globalAlpha = 1;
+}
+
+function loop() { drawSpectrum(); rafId = requestAnimationFrame(loop); }
+
+fileEl.addEventListener('change', () => {
+  const file = fileEl.files[0]; if (!file) return;
+  audioEl.src = URL.createObjectURL(file);
+  audioEl.load();
+  statusEl.textContent = file.name;
+  playBtn.disabled = stopBtn.disabled = false;
+});
+
+playBtn.addEventListener('click', async () => {
+  if (!audioCtx) initAudioGraph();
+  analyser.smoothingTimeConstant = parseFloat(smoothingEl.value);
+  gainNode.gain.value = parseFloat(gainEl.value);
+  await audioCtx.resume();
+  audioEl.play();
+  cancelAnimationFrame(rafId);
+  loop();
+});
+
+stopBtn.addEventListener('click', () => { cancelAnimationFrame(rafId); audioEl.pause(); audioEl.currentTime = 0; });
+
+// live control updates
+smoothingEl.addEventListener('input', () => { if (analyser) analyser.smoothingTimeConstant = parseFloat(smoothingEl.value); });
+
+gainEl.addEventListener('input', () => { if (gainNode) gainNode.gain.value = parseFloat(gainEl.value); });
+
+resize();
+window.addEventListener('resize', resize);
+
+// hover readout: frequency + dB
+function binToFreq(bin) {
+  const nyquist = (audioCtx?.sampleRate || 44100) / 2;
+  return bin * (nyquist / analyser.frequencyBinCount);
+}
+
+spectrumCanvas.addEventListener('mousemove', e => {
+  if (!audioCtx) return;
+  const rect = spectrumCanvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const bin = Math.min(analyser.frequencyBinCount-1, Math.max(0, Math.round(x / rect.width * analyser.frequencyBinCount)));
+  const freq = binToFreq(bin);
+  const db = freqArray?.[bin];
+  tooltip.style.display = 'block';
+  tooltip.style.left = e.clientX + 10 + 'px';
+  tooltip.style.top = e.clientY - 24 + 'px';
+  const fStr = freq >= 1000 ? (freq/1000).toFixed(2)+' kHz' : Math.round(freq)+' Hz';
+  const dStr = isFinite(db) ? `${db.toFixed(1)} dB` : '';
+  tooltip.textContent = `${fStr}${dStr? '  |  '+dStr: ''}`;
+});
+
+spectrumCanvas.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+</script>
+</body>
+</html>
