@@ -9,7 +9,7 @@
   html, body { height: 100%; margin: 0; background: #0b0e12; color: #e5e7eb; font-family: system-ui; }
   .wrap { display: grid; grid-template-rows: auto 1fr auto; height: 100%; }
   header, footer { padding: .75rem 1rem; background: #0f141b; border-bottom: 1px solid #1f2937; }
-  footer { border-top: 1px solid #1f2937; border-bottom: none; display:flex; gap:1rem; align-items:center; justify-content:space-between; }
+  footer { border-top: 1px solid #1f2937; border-bottom: none; display:flex; gap:1rem; align-items:center; justify-content:space-between; flex-wrap:wrap; }
   .controls { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
   .btn { background: #111827; border: 1px solid #374151; color: #e5e7eb; padding: .5rem .75rem; border-radius: .6rem; cursor: pointer; }
   .btn:hover{ background:#0b1220; }
@@ -19,13 +19,14 @@
   #spectrum { position:absolute; inset:0; width:100%; height:100%; display:block; }
   input[type="range"] { background:#0b1118; border:1px solid #253042; color:#e5e7eb; border-radius:.5rem; padding:.15rem .4rem; }
   .tooltip { position: absolute; background: rgba(0,0,0,0.85); border:1px solid #253042; color: #fff; padding: 2px 6px; border-radius: 4px; font-size: 0.8rem; pointer-events: none; display: none; white-space: nowrap; }
+  .meta { font-size: .85rem; color:#a7b0bb; }
 </style>
 </head>
 <body>
 <div class="wrap">
 <header>
   <div class="controls">
-    <input id="file" type="file" accept="audio/*,.wav,.mp3" />
+    <input id="file" type="file" accept="audio/*,.wav,.mp3,.flac,.m4a,.aac,.ogg" />
     <button id="play" class="btn" disabled>Play</button>
     <button id="stop" class="btn" disabled>Stop</button>
     <div class="stack">
@@ -44,6 +45,7 @@
 </div>
 <footer>
   <span id="status">Load a file</span>
+  <div class="meta" id="fileInfo">—</div>
   <audio id="audio" crossorigin="anonymous" controls style="max-width:40rem; width:100%"></audio>
 </footer>
 </div>
@@ -58,11 +60,11 @@ const spectrumCanvas = document.getElementById('spectrum');
 const tooltip = document.getElementById('tooltip');
 const smoothingEl = document.getElementById('smoothing');
 const gainEl = document.getElementById('gain');
+const fileInfoEl = document.getElementById('fileInfo');
 
 const specCtx = spectrumCanvas.getContext('2d');
 let audioCtx, source, analyser, gainNode;
-let rafId;
-let freqArray;
+let rafId; let freqArray;
 const DPR = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
 
 function resize() {
@@ -78,17 +80,12 @@ function initAudioGraph() {
   source = audioCtx.createMediaElementSource(audioEl);
   analyser = audioCtx.createAnalyser();
   gainNode = audioCtx.createGain();
-
-  analyser.fftSize = 4096; // can be tuned
-  analyser.minDecibels = -100;
-  analyser.maxDecibels = -10;
+  analyser.fftSize = 4096;
+  analyser.minDecibels = -100; analyser.maxDecibels = -10;
   analyser.smoothingTimeConstant = parseFloat(smoothingEl.value);
-
   gainNode.gain.value = parseFloat(gainEl.value);
-
   source.connect(gainNode).connect(audioCtx.destination);
   source.connect(analyser);
-
   freqArray = new Float32Array(analyser.frequencyBinCount);
 }
 
@@ -96,31 +93,67 @@ function drawSpectrum() {
   const w = spectrumCanvas.width, h = spectrumCanvas.height;
   specCtx.clearRect(0,0,w,h);
   analyser.getFloatFrequencyData(freqArray);
-
-  // curve
   specCtx.beginPath();
   for (let i = 0; i < analyser.frequencyBinCount; i++) {
     const db = freqArray[i];
-    const y = (1 - (db + 100) / 90) * h; // map -100..-10 dB → 1..0
+    const y = (1 - (db + 100) / 90) * h;
     const x = i * w / analyser.frequencyBinCount;
     if (i === 0) specCtx.moveTo(x, y); else specCtx.lineTo(x, y);
   }
   specCtx.strokeStyle = '#93c5fd';
   specCtx.lineWidth = 2 * DPR;
   specCtx.stroke();
-
-  // subtle fill
   specCtx.lineTo(w, h); specCtx.lineTo(0, h); specCtx.closePath();
   specCtx.globalAlpha = 0.18; specCtx.fillStyle = '#60a5fa'; specCtx.fill(); specCtx.globalAlpha = 1;
 }
 
 function loop() { drawSpectrum(); rafId = requestAnimationFrame(loop); }
 
+// ----- Quality estimate helpers -----
+function humanBytes(n){
+  const u=['B','KB','MB','GB']; let i=0; while(n>=1024 && i<u.length-1){n/=1024; i++;} return n.toFixed(i?1:0)+' '+u[i];
+}
+function guessCodec(ext){
+  ext = ext.toLowerCase();
+  if(['wav','aiff','aif','flac','alac','ape','wv'].includes(ext)) return {type:'lossless', note:ext.toUpperCase()};
+  if(ext==='m4a') return {type:'maybe', note:'m4a (AAC or ALAC)'};
+  if(['mp3','aac','ogg','oga','opus','wma','webm'].includes(ext)) return {type:'lossy', note:ext.toUpperCase()};
+  return {type:'unknown', note:ext};
+}
+function classifyQuality(ext, kbps){
+  const g = guessCodec(ext);
+  if(g.type==='lossless') return 'Lossless ('+g.note+')';
+  if(g.type==='maybe') return kbps>700 ? 'Lossless (ALAC likely)' : 'Lossy (AAC likely)';
+  if(g.type==='lossy'){
+    if(kbps>=300) return '≈320 kbps (high lossy)';
+    if(kbps>=220) return '≈256 kbps (high lossy)';
+    if(kbps>=170) return '≈192 kbps (medium lossy)';
+    return 'Low‑bitrate lossy';
+  }
+  return 'Unknown';
+}
+
+function updateFileInfo(file){
+  // Wait for duration then compute bitrate
+  const ext = (file.name.split('.').pop()||'').toLowerCase();
+  const onMeta = () => {
+    const dur = audioEl.duration; // seconds
+    if(!isFinite(dur) || dur<=0){ fileInfoEl.textContent = 'Duration not available'; return; }
+    const kbps = Math.round((file.size * 8 / dur) / 1000);
+    const quality = classifyQuality(ext, kbps);
+    fileInfoEl.textContent = `${file.name} • ${humanBytes(file.size)} • ${dur.toFixed(1)}s • ~${kbps} kbps • ${quality}`;
+    audioEl.removeEventListener('loadedmetadata', onMeta);
+  };
+  audioEl.addEventListener('loadedmetadata', onMeta);
+}
+// ------------------------------------
+
 fileEl.addEventListener('change', () => {
-  const file = fileEl.files[0]; if (!file) return;
-  audioEl.src = URL.createObjectURL(file);
-  audioEl.load();
+  const file = fileEl.files?.[0]; if (!file) return;
+  const url = URL.createObjectURL(file);
+  audioEl.src = url; audioEl.load();
   statusEl.textContent = file.name;
+  updateFileInfo(file);
   playBtn.disabled = stopBtn.disabled = false;
 });
 
@@ -136,7 +169,6 @@ playBtn.addEventListener('click', async () => {
 
 stopBtn.addEventListener('click', () => { cancelAnimationFrame(rafId); audioEl.pause(); audioEl.currentTime = 0; });
 
-// live control updates
 smoothingEl.addEventListener('input', () => { if (analyser) analyser.smoothingTimeConstant = parseFloat(smoothingEl.value); });
 
 gainEl.addEventListener('input', () => { if (gainNode) gainNode.gain.value = parseFloat(gainEl.value); });
@@ -144,7 +176,7 @@ gainEl.addEventListener('input', () => { if (gainNode) gainNode.gain.value = par
 resize();
 window.addEventListener('resize', resize);
 
-// hover readout: frequency + dB
+// Hover readout
 function binToFreq(bin) {
   const nyquist = (audioCtx?.sampleRate || 44100) / 2;
   return bin * (nyquist / analyser.frequencyBinCount);
